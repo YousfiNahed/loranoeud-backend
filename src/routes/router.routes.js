@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const ctrl    = require('../controllers/Routercontroller');
+const ctrl    = require('../controllers/routerController');
 const { protect, requirePermission } = require('../middleware/auth');
 
 // Toutes les routes nécessitent d'être connecté
