@@ -20,4 +20,10 @@ router.get('/encryption', ctrl.getEncryption);
 // PUT  /api/settings/encryption  → mettre à jour la config AES
 router.put('/encryption', ctrl.updateEncryption);
 
+// GET  /api/settings/lora-network  → lire les paramètres LoRa réseau
+router.get('/lora-network', ctrl.getLoraNetwork);
+
+// PUT  /api/settings/lora-network  → mettre à jour les paramètres LoRa et les propager
+router.put('/lora-network', ctrl.updateLoraNetwork);
+
 module.exports = router;

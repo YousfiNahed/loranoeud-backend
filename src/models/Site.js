@@ -32,6 +32,14 @@ const SiteSchema = new mongoose.Schema({
   aesEnabled: { type: Boolean, default: true  },
   aesKey:     { type: String,  default: null  }, // ✅ stocké chiffré avec AES_MASTER_KEY
 
+  // ── Paramètres radio LoRa partagés par tous les nœuds ───
+  // Ces 4 paramètres DOIVENT être identiques sur tous les nœuds
+  // du réseau pour qu'ils puissent communiquer.
+  loraFrequency: { type: String, default: '868 MHz' },
+  loraSf:        { type: String, default: 'SF10'    },
+  loraBw:        { type: String, default: '125 kHz' },
+  loraCr:        { type: String, default: '4/5'     },
+
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
