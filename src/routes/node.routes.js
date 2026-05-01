@@ -27,7 +27,5 @@ router.put('/:id', (req, res, next) => {
   return res.status(403).json({ message: 'Permission refusée. canManageNodes ou canConfigureNodes requis.' });
 }, ctrl.updateNode);
 
-// ── Mapping : canConfigureNodes requis ───────────────────────
-router.put('/:id/mapping', requirePermission('canConfigureNodes'), ctrl.updateMapping);
 
 module.exports = router;

@@ -294,7 +294,7 @@ exports.updateNode = async (req, res, next) => {
       'name', 'mode', 'baudRate', 'parity', 'modbusId', 'timeout',
       'frequency', 'sf', 'bw', 'cr', 'txPower', 'aes',
       'output', 'wifiSsid', 'wifiPass',
-      'mapping', 'parentRouterId', 'detectedVia', 'firmware',
+      'parentRouterId', 'detectedVia', 'firmware',
     ];
     allowed.forEach(key => {
       if (req.body[key] !== undefined) node[key] = req.body[key];
@@ -348,34 +348,6 @@ exports.deleteNode = async (req, res, next) => {
       msg: `Nœud supprimé : ${node.name} par ${req.user.fullName}`,
     });
     res.json({ message: 'Nœud supprimé.' });
-  } catch (err) { next(err); }
-};
-
-// ────────────────────────────────────────────────────────────
-//  PUT /api/nodes/:id/mapping
-// ────────────────────────────────────────────────────────────
-exports.updateMapping = async (req, res, next) => {
-  try {
-    if (!isValidObjectId(req.params.id))
-      return res.status(400).json({ message: 'ID de nœud invalide.' });
-
-    const { mapping } = req.body;
-    if (!Array.isArray(mapping))
-      return res.status(400).json({ message: 'mapping doit être un tableau.' });
-
-    const node = await Node.findOneAndUpdate(
-      { _id: req.params.id, siteId: req.user.siteId },
-      { mapping, updatedAt: Date.now() },
-      { new: true }
-    );
-    if (!node) return res.status(404).json({ message: 'Nœud introuvable.' });
-
-    await Log.add(req.user.siteId, {
-      tag: 'SYS', type: 'ok',
-      msg: `Mapping mis à jour : ${node.name}`,
-      nodeId: node._id,
-    });
-    res.json({ message: 'Mapping sauvegardé.', node });
   } catch (err) { next(err); }
 };
 
@@ -491,7 +463,7 @@ exports.getLiveData = async (req, res, next) => {
         mode:      liveStats.mode      ?? node.mode,
         firmware:  liveStats.firmware  ?? node.firmware,
         lastSeen:  new Date(),
-        registers: node.mapping?.map(r => ({ ...r, value: null })) ?? [],
+
       });
 
     } else {
@@ -523,7 +495,7 @@ exports.getLiveData = async (req, res, next) => {
         mode:     node.mode,
         firmware: node.firmware,
         lastSeen: node.lastSeen,
-        registers: node.mapping?.map(r => ({ ...r, value: null })) ?? [],
+
       });
     }
 
