@@ -14,7 +14,7 @@ const otaRoutes       = require('./routes/ota.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const routerRoutes    = require('./routes/router.routes');
 const settingsRoutes  = require('./routes/settings.routes');
-
+const syncRoutes = require('./routes/sync.routes');
 // ── Init ──────────────────────────────────────────────────────
 const app = express();
 connectDB();
@@ -43,7 +43,7 @@ app.use('/api/ota',       otaRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/routers',   routerRoutes);
 app.use('/api/settings',  settingsRoutes);
-
+app.use('/api/sync', syncRoutes);
 // ── 404 ───────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ message: `Route introuvable : ${req.originalUrl}` });
