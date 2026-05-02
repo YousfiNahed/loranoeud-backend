@@ -1,17 +1,25 @@
 /**
  * controllers/syncController.js  — BACKEND (Node.js / Render)
  *
- * Ces deux routes sont appelées par WatermelonDB sur le téléphone
- * pour synchroniser SQLite local ↔ MongoDB Atlas.
+ * ═══════════════════════════════════════════════════════
+ *  ARCHITECTURE OFFLINE-FIRST — RÈGLES ABSOLUES
+ * ═══════════════════════════════════════════════════════
  *
- * POST /api/sync/pull
- *   → Reçoit { lastSyncAt: timestamp }
- *   → Retourne tout ce qui a changé depuis ce timestamp
+ *  SQLite (téléphone) = source de vérité
+ *  MongoDB (cloud)    = sauvegarde secondaire
  *
- * POST /api/sync/push
- *   → Reçoit { changes: { nodes, logs, sites, users } }
- *   → Applique les changements dans MongoDB
- *   → Retourne { success: true }
+ *  SENS UNIQUE : téléphone → cloud uniquement
+ *
+ *  POST /api/sync/push
+ *    → Reçoit les enregistrements sync_pending=1 depuis SQLite
+ *    → Les applique dans MongoDB
+ *    → Retourne { success: true }
+ *
+ *  POST /api/sync/pull  ← DÉSACTIVÉ (410 Gone)
+ *    → Cette route est supprimée pour respecter l'architecture offline-first
+ *    → Le cloud ne doit JAMAIS écraser SQLite
+ *    → L'initialisation unique passe par GET /api/nodes, /api/users, etc.
+ *      avec INSERT OR IGNORE côté SQLite (initializeFromCloudIfEmpty)
  */
 
 const Node = require('../models/Node');
@@ -20,152 +28,22 @@ const Site = require('../models/Site');
 const User = require('../models/User');
 
 // ─────────────────────────────────────────────────────────────
-//  Helper : convertir un document MongoDB → format WatermelonDB
+//  POST /api/sync/pull  — DÉSACTIVÉ
+//  Route supprimée : le cloud n'écrase jamais SQLite.
+//  Retourne 410 Gone pour informer les anciens clients.
 // ─────────────────────────────────────────────────────────────
-function nodeToWatermelon(n) {
-  return {
-    id:                String(n._id),  // WatermelonDB utilise 'id' comme clé primaire
-    server_id:         String(n._id),
-    site_id:           n.siteId ?? '',
-    name:              n.name ?? '',
-    mac_address:       n.macAddress ?? '',
-    node_ip:           n.nodeId ?? '',
-    mode:              n.mode ?? 'Slave',
-    baud_rate:         n.baudRate ?? '9600',
-    parity:            n.parity ?? 'None',
-    modbus_id:         n.modbusId ?? '1',
-    timeout:           n.timeout ?? 1000,
-    retries:           n.retries !== false ? 1 : 0,
-    fc:                n.fc ?? 'FC03',
-    frequency:         n.frequency ?? '868 MHz',
-    sf:                n.sf ?? 'SF10',
-    bw:                n.bw ?? '125 kHz',
-    cr:                n.cr ?? '4/5',
-    tx_power:          n.txPower ?? 17,
-    low_power:         n.lowPower ? 1 : 0,
-    aes:               n.aes !== false ? 1 : 0,
-    output:            n.output ?? '',
-    wifi_ssid:         n.wifiSsid ?? '',
-    wifi_pass:         '',  // sécurité : on n'envoie pas le mot de passe WiFi
-    parent_router_id:  n.parentRouterId ? String(n.parentRouterId) : '',
-    detected_via:      n.detectedVia ?? '',
-    firmware:          n.firmware ?? '',
-    config_pending:    n.configPending ? 1 : 0,
-    config_applied_at: n.configAppliedAt ? new Date(n.configAppliedAt).getTime() : 0,
-    config_error:      n.configError ?? '',
-    status:            n.status ?? 'offline',
-    rssi:              n.rssi ?? 0,
-    snr:               n.snr ?? 0,
-    latency:           n.latency ?? 0,
-    last_seen:         n.lastSeen ? new Date(n.lastSeen).getTime() : 0,
-    mapping_json:      JSON.stringify(n.mapping ?? []),
-    sync_pending:      0,
-    modified_at:       new Date(n.updatedAt ?? n.createdAt ?? Date.now()).getTime(),
-    active:            n.active !== false ? 1 : 0,
-    created_at:        new Date(n.createdAt ?? Date.now()).getTime(),
-    updated_at:        new Date(n.updatedAt ?? Date.now()).getTime(),
-  };
-}
-
-function logToWatermelon(l) {
-  return {
-    id:          String(l._id),
-    server_id:   String(l._id),
-    site_id:     l.siteId ?? '',
-    tag:         l.tag ?? 'SYS',
-    type:        l.type ?? 'info',
-    msg:         l.msg ?? '',
-    node_id:     l.nodeId ?? '',
-    sync_pending: 0,
-    created_at:  new Date(l.createdAt ?? Date.now()).getTime(),
-  };
-}
-
-function siteToWatermelon(s) {
-  return {
-    id:             String(s._id),
-    server_id:      String(s._id),
-    site_id:        s.siteId ?? '',
-    site_name:      s.siteName ?? '',
-    aes_enabled:    s.aesEnabled ? 1 : 0,
-    aes_key:        '',  // sécurité : ne pas envoyer la clé AES sur le téléphone
-    lora_frequency: s.loraFrequency ?? '868 MHz',
-    lora_sf:        s.loraSf ?? 'SF10',
-    lora_bw:        s.loraBw ?? '125 kHz',
-    lora_cr:        s.loraCr ?? '4/5',
-    active:         s.active !== false ? 1 : 0,
-    sync_pending:   0,
-    created_at:     new Date(s.createdAt ?? Date.now()).getTime(),
-    updated_at:     new Date(s.updatedAt ?? Date.now()).getTime(),
-  };
-}
-
-function userToWatermelon(u) {
-  return {
-    id:               String(u._id),
-    server_id:        String(u._id),
-    site_id:          u.siteId ?? '',
-    full_name:        u.fullName ?? '',
-    email:            u.email ?? '',
-    role:             u.role ?? 'Technicien',
-    permissions_json: JSON.stringify(u.permissions ?? {}),
-    active:           u.active !== false ? 1 : 0,
-    last_login:       u.lastLogin ? new Date(u.lastLogin).getTime() : 0,
-    created_at:       new Date(u.createdAt ?? Date.now()).getTime(),
-    updated_at:       new Date(u.updatedAt ?? Date.now()).getTime(),
-  };
-}
-
-// ─────────────────────────────────────────────────────────────
-//  POST /api/sync/pull
-//  Retourne tout ce qui a changé depuis lastSyncAt
-// ─────────────────────────────────────────────────────────────
-exports.pull = async (req, res, next) => {
-  try {
-    const siteId     = req.user.siteId;
-    const lastSyncAt = req.body.lastSyncAt ? new Date(req.body.lastSyncAt) : new Date(0);
-    const now        = Date.now();
-
-    // Récupérer tout ce qui a changé depuis le dernier sync
-    const [nodes, logs, sites, users] = await Promise.all([
-      Node.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
-      Log.find({ siteId, createdAt: { $gte: lastSyncAt } }).sort({ createdAt: -1 }).limit(200),
-      Site.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
-      User.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
-    ]);
-
-    // Construire la réponse au format WatermelonDB
-    const changes = {
-      nodes: {
-        created: nodes.filter(n => new Date(n.createdAt) >= lastSyncAt).map(nodeToWatermelon),
-        updated: nodes.filter(n => new Date(n.createdAt) < lastSyncAt).map(nodeToWatermelon),
-        deleted: [],  // les suppressions sont gérées par le champ active = false
-      },
-      logs: {
-        created: logs.map(logToWatermelon),
-        updated: [],
-        deleted: [],
-      },
-      sites: {
-        created: sites.filter(s => new Date(s.createdAt) >= lastSyncAt).map(siteToWatermelon),
-        updated: sites.filter(s => new Date(s.createdAt) < lastSyncAt).map(siteToWatermelon),
-        deleted: [],
-      },
-      users: {
-        created: users.filter(u => new Date(u.createdAt) >= lastSyncAt).map(userToWatermelon),
-        updated: users.filter(u => new Date(u.createdAt) < lastSyncAt).map(userToWatermelon),
-        deleted: [],
-      },
-    };
-
-    res.json({ changes, timestamp: now });
-
-  } catch (err) { next(err); }
+exports.pull = async (req, res) => {
+  return res.status(410).json({
+    error:   'Route désactivée',
+    message: 'Architecture offline-first : le cloud ne doit jamais écraser SQLite. ' +
+             'Utilisez initializeFromCloudIfEmpty() au premier démarrage via GET /api/nodes, /api/users, etc.',
+  });
 };
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sync/push
-//  Reçoit les changements locaux et les applique dans MongoDB
+//  Reçoit les changements locaux (sync_pending=1) et les applique dans MongoDB
+//  Appelé automatiquement par startAutoSync() toutes les 30s
 // ─────────────────────────────────────────────────────────────
 exports.push = async (req, res, next) => {
   try {
