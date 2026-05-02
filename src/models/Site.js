@@ -30,7 +30,7 @@ const SiteSchema = new mongoose.Schema({
 
   // ── Chiffrement AES-128 réseau LoRa ──────────────────────
   aesEnabled: { type: Boolean, default: true  },
-  aesKey:     { type: String,  default: null  }, // ✅ stocké chiffré avec AES_MASTER_KEY
+  aesKey:     { type: String,  default: null  }, // ✅ clé Base64 (24 chars = 16 octets), stockée chiffrée avec AES_MASTER_KEY
 
   // ── Paramètres radio LoRa partagés par tous les nœuds ───
   // Ces 4 paramètres DOIVENT être identiques sur tous les nœuds

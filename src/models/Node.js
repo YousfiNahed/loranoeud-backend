@@ -60,7 +60,8 @@ const NodeSchema = new mongoose.Schema({
   lowPower:  { type: Boolean, default: false },
 
   // Sécurité
-  aes: { type: Boolean, default: true },
+  aes:    { type: Boolean, default: true },
+  aesKey: { type: String,  default: null }, // Clé AES-128 en Base64 (héritée des settings du site)
 
   // Sortie (Master uniquement)
   output:   { type: String, enum: ['Modbus RTU', 'Wi-Fi', 'Ethernet', null], default: null },
@@ -89,6 +90,8 @@ const NodeSchema = new mongoose.Schema({
   latency:  { type: Number },
   lastSeen: { type: Date },
 
+  // Registres Modbus mappés
+  mapping: { type: Array, default: [] },
 
   active:    { type: Boolean, default: true },
   createdAt: { type: Date,    default: Date.now },
