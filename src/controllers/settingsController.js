@@ -3,47 +3,45 @@
  *
  * Gestion des paramètres globaux du site.
  *
- * 1. Chiffrement AES-128 réseau LoRa — clé en Base64 (16 octets = 24 chars).
+ * 1. Chiffrement AES-128 réseau LoRa.
  * 2. Paramètres radio LoRa (frequency, SF, BW, CR) — identiques sur tous les nœuds.
  *
- * ARCHITECTURE : SQLite (app) → ESP32 (direct WiFi) → cloud (optionnel)
- * Le backend ne contacte JAMAIS les cartes directement — il ne peut pas
- * joindre leurs IPs locales (192.168.x.x) depuis internet.
- * Il se contente de sauvegarder en MongoDB. L'app mobile lit depuis SQLite
- * et pousse directement vers la carte quand elle est sur le même réseau.
+ * La clé AES est stockée dans le modèle Site (champ aesEnabled + aesKey).
+ * Les paramètres LoRa sont stockés dans Site et propagés à tous les nœuds via updateMany.
  */
 
 const Site = require('../models/Site');
 const Node = require('../models/Node');
 const Log  = require('../models/Log');
 
-// ── Validation clé AES-128 en Base64 (16 octets → 24 chars) ──
-const AES_B64_REGEX = /^[A-Za-z0-9+/]{22}==$/;
-const isValidAESKey = (key) => {
-  if (!key || !AES_B64_REGEX.test(key)) return false;
-  try { return Buffer.from(key, 'base64').length === 16; }
-  catch { return false; }
-};
+// ── Validation clé AES-128 (32 caractères hex) ──────────────
+const AES_REGEX = /^[0-9A-Fa-f]{32}$/;
+const isValidAESKey = (key) => AES_REGEX.test(key?.replace(/-/g, ''));
+const cleanKey = (key) => (key ?? '').replace(/-/g, '').toUpperCase();
 
 // ────────────────────────────────────────────────────────────
 //  GET /api/settings/encryption
+//  Récupère la config AES actuelle du site (Responsable only)
 // ────────────────────────────────────────────────────────────
 exports.getEncryption = async (req, res, next) => {
   try {
     const site = await Site.findOne({ siteId: req.user.siteId });
     if (!site) return res.status(404).json({ message: 'Site introuvable.' });
 
+    // ✅ OFFLINE-FIRST : retourner la vraie clé pour que l'app
+    // puisse initialiser SQLite au premier login sur un nouvel appareil.
+    // La clé est protégée par le token JWT (route protégée).
     res.json({
       aesEnabled: site.aesEnabled ?? true,
-      aesKey:     site.aesKey ?? null, // clé en clair — connexion sécurisée par JWT
+      aesKey:     site.aesKey ?? null,
     });
   } catch (err) { next(err); }
 };
 
 // ────────────────────────────────────────────────────────────
 //  PUT /api/settings/encryption
-//  Sauvegarde en MongoDB. L'app mobile se charge de pousser
-//  la config aux cartes directement depuis le réseau local.
+//  Met à jour la config AES et la propage aux nœuds en ligne
+//  Responsable uniquement (vérifié dans la route)
 // ────────────────────────────────────────────────────────────
 exports.updateEncryption = async (req, res, next) => {
   try {
@@ -53,43 +51,47 @@ exports.updateEncryption = async (req, res, next) => {
       return res.status(400).json({ message: 'aesEnabled doit être un booléen.' });
     }
 
+    // Valider la clé si le chiffrement est activé
     let cleanedKey = null;
     if (aesEnabled) {
       if (!aesKey) {
         return res.status(400).json({ message: 'Une clé AES-128 est requise quand le chiffrement est activé.' });
       }
-      cleanedKey = aesKey.trim();
+      cleanedKey = cleanKey(aesKey);
       if (!isValidAESKey(cleanedKey)) {
-        return res.status(400).json({ message: 'Clé AES invalide. 24 caractères Base64 requis (16 octets, ex: aB3+xZ7/kL9mN2pQ4rS6tA==).' });
+        return res.status(400).json({ message: 'Clé AES invalide. 32 caractères hexadécimaux requis (0-9, A-F).' });
       }
     }
 
-    // 1. Mettre à jour le Site
+    // Mettre à jour le site
     const site = await Site.findOneAndUpdate(
       { siteId: req.user.siteId },
-      { aesEnabled, aesKey: cleanedKey, updatedAt: new Date() },
+      {
+        aesEnabled,
+        aesKey: cleanedKey,
+        updatedAt: new Date(),
+      },
       { new: true, upsert: false }
     );
     if (!site) return res.status(404).json({ message: 'Site introuvable.' });
 
-    // 2. Propager flag + clé à tous les nœuds en MongoDB
-    //    configPending = true → l'app mobile poussera la config à la carte
-    //    dès qu'elle sera connectée au même réseau WiFi que la carte
+    // Propager le flag AES à tous les nœuds actifs du site
     const updateResult = await Node.updateMany(
       { siteId: req.user.siteId, active: { $ne: false } },
-      { $set: { aes: aesEnabled, aesKey: cleanedKey, configPending: true, updatedAt: new Date() } }
+      { $set: { aes: aesEnabled, updatedAt: new Date() } }
     );
 
+    // Compter les nœuds en ligne vs hors ligne
     const onlineCount  = await Node.countDocuments({ siteId: req.user.siteId, status: 'online' });
     const offlineCount = await Node.countDocuments({ siteId: req.user.siteId, status: { $ne: 'online' } });
 
     await Log.add(req.user.siteId, {
       tag: 'SYS', type: 'ok',
-      msg: `Chiffrement AES-128 ${aesEnabled ? 'activé' : 'désactivé'} par ${req.user.fullName}. ${updateResult.modifiedCount} nœud(s) mis à jour en base.`,
+      msg: `Chiffrement AES-128 ${aesEnabled ? 'activé' : 'désactivé'} par ${req.user.fullName}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
     });
 
     res.json({
-      message:      `Chiffrement ${aesEnabled ? 'activé' : 'désactivé'} — ${updateResult.modifiedCount} nœud(s) mis à jour.`,
+      message:      `Chiffrement ${aesEnabled ? 'activé' : 'désactivé'} sur ${updateResult.modifiedCount} nœud(s).`,
       aesEnabled,
       updatedNodes: onlineCount,
       pendingNodes: offlineCount,
@@ -105,6 +107,7 @@ const VALID_CR   = ['4/5', '4/6', '4/7', '4/8'];
 
 // ────────────────────────────────────────────────────────────
 //  GET /api/settings/lora-network
+//  Récupère les paramètres LoRa réseau du site (Responsable only)
 // ────────────────────────────────────────────────────────────
 exports.getLoraNetwork = async (req, res, next) => {
   try {
@@ -122,8 +125,14 @@ exports.getLoraNetwork = async (req, res, next) => {
 
 // ────────────────────────────────────────────────────────────
 //  PUT /api/settings/lora-network
-//  Sauvegarde en MongoDB. L'app mobile se charge de pousser
-//  la config aux cartes directement depuis le réseau local.
+//  Met à jour les paramètres radio LoRa et les propage à TOUS les nœuds du site.
+//  Responsable uniquement.
+//
+//  Logique identique à updateEncryption :
+//    1. Valide les valeurs reçues
+//    2. Sauvegarde dans Site
+//    3. Node.updateMany → tous les nœuds actifs reçoivent les nouveaux paramètres
+//       + configPending = true (nodePusher les renverra à la carte dès reconnexion)
 // ────────────────────────────────────────────────────────────
 exports.updateLoraNetwork = async (req, res, next) => {
   try {
@@ -146,9 +155,8 @@ exports.updateLoraNetwork = async (req, res, next) => {
     );
     if (!site) return res.status(404).json({ message: 'Site introuvable.' });
 
-    // 2. Propager à tous les nœuds en MongoDB
-    //    configPending = true → l'app mobile poussera la config à la carte
-    //    dès qu'elle sera connectée au même réseau WiFi que la carte
+    // 2. Propager à TOUS les nœuds actifs du site
+    //    configPending = true → nodePusher renverra la config à chaque carte dès reconnexion
     const updateResult = await Node.updateMany(
       { siteId: req.user.siteId, active: { $ne: false } },
       {
@@ -168,11 +176,11 @@ exports.updateLoraNetwork = async (req, res, next) => {
 
     await Log.add(req.user.siteId, {
       tag: 'SYS', type: 'ok',
-      msg: `Paramètres LoRa réseau mis à jour par ${req.user.fullName} : ${loraFrequency} · ${loraSf} · ${loraBw} · ${loraCr}. ${updateResult.modifiedCount} nœud(s) mis à jour en base.`,
+      msg: `Paramètres LoRa réseau mis à jour par ${req.user.fullName} : ${loraFrequency} · ${loraSf} · ${loraBw} · ${loraCr}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
     });
 
     res.json({
-      message:      `Paramètres LoRa mis à jour — ${updateResult.modifiedCount} nœud(s) en base.`,
+      message:      `Paramètres LoRa propagés sur ${updateResult.modifiedCount} nœud(s).`,
       loraFrequency, loraSf, loraBw, loraCr,
       updatedNodes:  onlineCount,
       pendingNodes:  offlineCount,

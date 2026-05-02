@@ -2,6 +2,31 @@ const Log      = require('../models/Log');
 const mongoose = require('mongoose');
 
 // ────────────────────────────────────────────────────────────
+//  POST /api/logs
+//  Reçoit un log créé localement (offline-first push)
+//  L'app crée les logs dans SQLite et les pousse ici quand internet dispo
+// ────────────────────────────────────────────────────────────
+exports.createLog = async (req, res, next) => {
+  try {
+    const { tag, type, msg, nodeId, createdAt } = req.body;
+
+    if (!msg?.trim())
+      return res.status(400).json({ message: 'Le champ msg est requis.' });
+
+    const log = await Log.create({
+      siteId:    req.user.siteId,
+      tag:       tag  ?? 'SYS',
+      type:      type ?? 'info',
+      msg:       msg.trim(),
+      nodeId:    nodeId ?? null,
+      createdAt: createdAt ? new Date(createdAt) : new Date(),
+    });
+
+    res.status(201).json({ log: { _id: log._id, ...log.toObject() } });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
 //  GET /api/logs
 //  Récupère les logs du site avec filtre optionnel
 // ────────────────────────────────────────────────────────────
