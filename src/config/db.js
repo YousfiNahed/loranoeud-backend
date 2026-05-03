@@ -1,16 +1,33 @@
+/**
+ * config/db.js — BACKEND
+ */
+
 const mongoose = require('mongoose');
 
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser:    true,
-      useUnifiedTopology: true,
+    await mongoose.connect(process.env.MONGO_URI, {
+      tls:                         true,
+      tlsAllowInvalidCertificates: false,
+      serverSelectionTimeoutMS:    10000,
+      socketTimeoutMS:             45000,
+      maxPoolSize:                 10,
     });
-    console.log(`[DB] MongoDB connecté : ${conn.connection.host}`);
+    console.log('[DB] MongoDB Atlas connecté ✓ :', mongoose.connection.host);
   } catch (err) {
-    console.error('[DB] Erreur de connexion MongoDB :', err.message);
-    process.exit(1);
+    console.error('[DB] Erreur connexion :', err.message);
+    console.log('[DB] Retry dans 5s...');
+    setTimeout(connectDB, 5000);
   }
 };
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[DB] Déconnecté — reconnexion...');
+  setTimeout(connectDB, 5000);
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('[DB] Erreur MongoDB :', err.message);
+});
 
 module.exports = connectDB;
