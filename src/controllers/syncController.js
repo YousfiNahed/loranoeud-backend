@@ -58,7 +58,7 @@ function nodeToWatermelon(n) {
     snr:               n.snr ?? 0,
     latency:           n.latency ?? 0,
     last_seen:         n.lastSeen ? new Date(n.lastSeen).getTime() : 0,
-    // mapping_json supprimé — rôle SCADA
+    mapping_json:      JSON.stringify(n.mapping ?? []),
     sync_pending:      0,
     modified_at:       new Date(n.updatedAt ?? n.createdAt ?? Date.now()).getTime(),
     active:            n.active !== false ? 1 : 0,
@@ -120,7 +120,11 @@ function userToWatermelon(u) {
 //  POST /api/sync/pull
 //  Retourne tout ce qui a changé depuis lastSyncAt
 // ─────────────────────────────────────────────────────────────
-exports.pull = async (req, res, next) => {
+exports.pull = async (req, res) => {
+  return res.status(410).json({ error: 'Route desactivee', message: 'Architecture offline-first.' });
+};
+
+exports.pull_disabled = async (req, res, next) => {
   try {
     const siteId     = req.user.siteId;
     const lastSyncAt = req.body.lastSyncAt ? new Date(req.body.lastSyncAt) : new Date(0);
@@ -165,12 +169,36 @@ exports.pull = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sync/push
-//  Reçoit les changements locaux et les applique dans MongoDB
+//  Reçoit les changements locaux et les applique dans MongoDB.
+//
+//  CAS SPÉCIAL — Reset cloud :
+//  Si le body contient { resetCloud: true }, on vide d'abord
+//  toutes les données de ce site dans MongoDB, puis on applique
+//  ce qui vient de SQLite. C'est le comportement quand l'utilisateur
+//  appuie sur "Réinitialiser SQLite" puis "Envoyer vers le cloud".
 // ─────────────────────────────────────────────────────────────
 exports.push = async (req, res, next) => {
   try {
-    const siteId  = req.user.siteId;
-    const changes = req.body.changes ?? {};
+    const siteId     = req.user.siteId;
+    const changes    = req.body.changes    ?? {};
+    const resetCloud = req.body.resetCloud ?? false;
+
+    // ── Reset cloud si demandé ───────────────────────────────
+    // Efface tout ce qui appartient à ce site dans MongoDB
+    // avant d'appliquer les nouvelles données depuis SQLite
+    if (resetCloud) {
+      await Promise.all([
+        Node.deleteMany({ siteId }),
+        Log.deleteMany({ siteId }),
+        // Ne pas supprimer le Site lui-même — garder les paramètres
+        // Ne pas supprimer les Users — le Responsable doit rester
+      ]);
+      await Log.add(siteId, {
+        tag: 'SYS', type: 'warn',
+        msg: `Reset cloud effectue par ${req.user.fullName} — donnees du site effacees et reenregistrees depuis SQLite`,
+      });
+      console.log(`[syncController] Reset cloud pour le site ${siteId}`);
+    }
 
     // ── Traiter les nœuds ────────────────────────────────────
     const nodeChanges = changes.nodes ?? {};
