@@ -8,8 +8,9 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
       tls:                         true,
-      tlsAllowInvalidCertificates: false,
-      serverSelectionTimeoutMS:    10000,
+      tlsAllowInvalidCertificates: true,  // ← débloquer Render
+      tlsAllowInvalidHostnames:    true,  // ← débloquer Render
+      serverSelectionTimeoutMS:    15000,
       socketTimeoutMS:             45000,
       maxPoolSize:                 10,
     });
