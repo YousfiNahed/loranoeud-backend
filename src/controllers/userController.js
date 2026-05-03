@@ -78,6 +78,7 @@ exports.createUser = async (req, res, next) => {
           email:  req.body.email?.trim().toLowerCase(),
           siteId: req.user.siteId,
         });
+        console.log('[DEBUG 409] existing:', existing?._id); // ← ajouter
         return res.status(409).json({
           message: 'Email déjà utilisé.',
           user: existing ? existing.toSafeObject() : null,
