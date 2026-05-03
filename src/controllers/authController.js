@@ -187,3 +187,90 @@ exports.getProfiles = async (req, res, next) => {
     res.json({ users: profiles, site: site?.siteName ?? siteId });
   } catch (err) { next(err); }
 };
+
+// ────────────────────────────────────────────────────────────
+//  POST /api/auth/seed-site
+//  Cree un site + responsable dans MongoDB depuis le seed mobile
+//  Route publique — appelee une seule fois avant livraison
+// ────────────────────────────────────────────────────────────
+exports.seedSite = async (req, res, next) => {
+  try {
+    const {
+      siteId, siteName,
+      loraFrequency, loraSf, loraBw, loraCr,
+      aesEnabled, responsable,
+    } = req.body;
+
+    if (!siteId || !siteName || !responsable?.email || !responsable?.password) {
+      return res.status(400).json({
+        message: 'siteId, siteName, responsable.email et responsable.password requis.'
+      });
+    }
+    if (responsable.password.length < 6) {
+      return res.status(400).json({ message: 'Mot de passe minimum 6 caracteres.' });
+    }
+
+    // Site deja existant → retourner les IDs + JWT valide
+    const existingSite = await Site.findOne({ siteId: siteId.trim().toLowerCase() });
+    if (existingSite) {
+      const existingResp = await User.findOne({
+        siteId: siteId.trim().toLowerCase(),
+        role:   'Responsable',
+        active: true,
+      });
+      if (existingResp) {
+        const token = signToken(existingResp._id);
+        return res.json({
+          message:       'Site deja existant',
+          siteServerId:  String(existingSite._id),
+          responsableId: String(existingResp._id),
+          token,
+          alreadyExists: true,
+        });
+      }
+    }
+
+    // Creer le site
+    const site = await Site.create({
+      siteId:        siteId.trim().toLowerCase(),
+      siteName:      siteName.trim(),
+      loraFrequency: loraFrequency ?? '868 MHz',
+      loraSf:        loraSf        ?? 'SF10',
+      loraBw:        loraBw        ?? '125 kHz',
+      loraCr:        loraCr        ?? '4/5',
+      aesEnabled:    aesEnabled    ?? true,
+    });
+
+    // Creer le responsable avec mot de passe temporaire
+    const resp = await User.create({
+      siteId:   siteId.trim().toLowerCase(),
+      fullName: responsable.fullName ?? 'Responsable',
+      email:    responsable.email.trim().toLowerCase(),
+      role:     'Responsable',
+      password: responsable.password,
+    });
+
+    // Generer un vrai JWT valide immediatement
+    const token = signToken(resp._id);
+
+    await Log.add(siteId.trim().toLowerCase(), {
+      tag: 'SYS', type: 'ok',
+      msg: `Site initialise : ${siteName}. Responsable : ${responsable.email}.`,
+    });
+
+    console.log(`[seedSite] Site cree dans MongoDB : ${siteName} (${siteId})`);
+
+    res.status(201).json({
+      message:       'Site et responsable crees avec succes',
+      siteServerId:  String(site._id),
+      responsableId: String(resp._id),
+      token,
+    });
+
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ message: 'Ce site ou cet email existe deja.' });
+    }
+    next(err);
+  }
+};
