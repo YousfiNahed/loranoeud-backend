@@ -90,8 +90,7 @@ const NodeSchema = new mongoose.Schema({
   latency:  { type: Number },
   lastSeen: { type: Date },
 
-  // Registres Modbus mappés
-  mapping: { type: Array, default: [] },
+  // mapping supprimé — rôle du SCADA uniquement
 
   active:    { type: Boolean, default: true },
   createdAt: { type: Date,    default: Date.now },

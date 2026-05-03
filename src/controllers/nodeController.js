@@ -103,6 +103,8 @@ exports.getNodes = async (req, res, next) => {
       parity:         n.parity,
       modbusId:       n.modbusId,
       timeout:        n.timeout,
+      retries:        n.retries,
+      fc:             n.fc,       // ✅ AJOUT — Function Code Modbus
       aes:            n.aes,
       output:         n.mode === 'Master' ? (n.output ?? 'Modbus RTU') : null,
       wifiSsid:       n.mode === 'Master' && n.output === 'Wi-Fi' ? n.wifiSsid : null,
@@ -291,11 +293,11 @@ exports.updateNode = async (req, res, next) => {
     }
 
     const allowed = [
-      'name', 'mode', 'baudRate', 'parity', 'modbusId', 'timeout',
-      'frequency', 'sf', 'bw', 'cr', 'txPower', 'aes',
+      'name', 'mode', 'baudRate', 'parity', 'modbusId', 'timeout', 'retries', 'fc',
+      'frequency', 'sf', 'bw', 'cr', 'txPower', 'lowPower', 'aes',
       'output', 'wifiSsid', 'wifiPass',
       'parentRouterId', 'detectedVia', 'firmware',
-    ];
+    ]; // ✅ Ajout : retries, fc, lowPower — étaient absents
     allowed.forEach(key => {
       if (req.body[key] !== undefined) node[key] = req.body[key];
     });
