@@ -18,6 +18,14 @@ exports.getUsers = async (req, res, next) => {
 // ────────────────────────────────────────────────────────────
 //  POST /api/users/new
 //  Créer un Technicien (Responsable only)
+//
+//  FLUX :
+//    - Valide les champs
+//    - Crée le user dans MongoDB
+//    - 201 : retourne le user créé avec son _id
+//    - 409 : email déjà utilisé → retourne le user EXISTANT
+//            avec son _id pour que SQLite puisse sauvegarder
+//            le server_id et faire des PUT/DELETE corrects
 // ────────────────────────────────────────────────────────────
 exports.createUser = async (req, res, next) => {
   try {
@@ -58,7 +66,28 @@ exports.createUser = async (req, res, next) => {
     });
 
     res.status(201).json({ message: 'Utilisateur créé.', user: user.toSafeObject() });
-  } catch (err) { next(err); }
+
+  } catch (err) {
+    // ── Duplicate email (code MongoDB 11000) ──────────────────
+    // Le user existe déjà dans le cloud (POST envoyé deux fois
+    // depuis SQLite offline-first). On retourne le user existant
+    // avec son _id pour que SQLite puisse sauvegarder server_id.
+    if (err.code === 11000) {
+      try {
+        const existing = await User.findOne({
+          email:  req.body.email?.trim().toLowerCase(),
+          siteId: req.user.siteId,
+        });
+        return res.status(409).json({
+          message: 'Email déjà utilisé.',
+          user: existing ? existing.toSafeObject() : null,
+        });
+      } catch (findErr) {
+        return res.status(409).json({ message: 'Email déjà utilisé.', user: null });
+      }
+    }
+    next(err);
+  }
 };
 
 // ────────────────────────────────────────────────────────────
@@ -72,14 +101,13 @@ exports.updateUser = async (req, res, next) => {
     const user = await User.findOne({ _id: req.params.id, siteId: req.user.siteId });
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable.' });
 
-    // On ne peut pas modifier le Responsable via cette route
     if (user.role === 'Responsable') {
       return res.status(403).json({ message: 'Le compte Responsable ne peut pas être modifié ici.' });
     }
 
-    if (fullName?.trim()) user.fullName = fullName.trim();
-    if (email?.trim() && email.includes('@')) user.email = email.trim().toLowerCase();
-    if (pin && String(pin).length === 4 && !isNaN(pin)) user.pin = String(pin);
+    if (fullName?.trim())                              user.fullName    = fullName.trim();
+    if (email?.trim() && email.includes('@'))          user.email       = email.trim().toLowerCase();
+    if (pin && String(pin).length === 4 && !isNaN(pin)) user.pin       = String(pin);
     if (permissions) user.permissions = { ...user.permissions.toObject(), ...permissions };
 
     await user.save();
