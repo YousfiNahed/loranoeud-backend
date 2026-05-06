@@ -10,13 +10,6 @@
 
 const mongoose = require('mongoose');
 
-const IP_REGEX  = /^(\d{1,3}\.){3}\d{1,3}$/;
-const isValidIP = (v) => {
-  if (!v) return false;
-  if (!IP_REGEX.test(v)) return false;
-  return v.split('.').every(p => { const n = parseInt(p, 10); return n >= 0 && n <= 255; });
-};
-
 const MAC_REGEX  = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
 const isValidMAC = (v) => v && MAC_REGEX.test(v.trim());
 
@@ -24,21 +17,12 @@ const NodeSchema = new mongoose.Schema({
   siteId: { type: String, required: true, ref: 'Site' },
   name:   { type: String, required: true, trim: true },
 
-  // Adresse permanente (gravée dans la puce)
+  // Adresse permanente — identifiant unique de la carte
   macAddress: {
-    type: String, default: null, trim: true,
+    type: String, required: true, trim: true,
     validate: {
-      validator: v => v === null || v === '' || isValidMAC(v),
+      validator: v => isValidMAC(v),
       message: 'macAddress invalide. Format : XX:XX:XX:XX:XX:XX',
-    },
-  },
-
-  // Adresse IP courante (peut changer)
-  nodeId: {
-    type: String, default: null, trim: true,
-    validate: {
-      validator: v => v === null || v === '' || isValidIP(v),
-      message: 'nodeId invalide. Format : 192.168.X.X',
     },
   },
 
@@ -61,7 +45,7 @@ const NodeSchema = new mongoose.Schema({
 
   // Sécurité
   aes:    { type: Boolean, default: true },
-  aesKey: { type: String,  default: null }, // Clé AES-128 en Base64 (héritée des settings du site)
+  aesKey: { type: String,  default: null },
 
   // Sortie (Master uniquement)
   output:   { type: String, enum: ['Modbus RTU', 'Wi-Fi', 'Ethernet', null], default: null },
@@ -75,36 +59,27 @@ const NodeSchema = new mongoose.Schema({
   detectedVia: { type: String, enum: ['bluetooth', 'wifi', null], default: null },
   firmware:    { type: String, default: null, trim: true },
 
-  // ── Synchronisation config avec la carte ─────────────────
-  // configPending = true  : la config en BDD n'a pas encore été envoyée
-  //                         à la carte (carte hors ligne ou sans IP)
-  // configPending = false : la carte a confirmé avoir reçu la config
-  configPending:   { type: Boolean, default: true },
-  configAppliedAt: { type: Date,    default: null },
-  configError:     { type: String,  default: null },
+  // Date de dernière config envoyée (depuis l'app directement)
+  configAppliedAt: { type: Date, default: null },
 
-  // État temps réel
+  // État temps réel (mis à jour par pollNode dans l'app)
   status:   { type: String, enum: ['online', 'offline', 'warning', 'error'], default: 'offline' },
   rssi:     { type: Number },
   snr:      { type: Number },
   latency:  { type: Number },
   lastSeen: { type: Date },
 
-  // mapping supprimé — rôle du SCADA uniquement
-
   active:    { type: Boolean, default: true },
   createdAt: { type: Date,    default: Date.now },
   updatedAt: { type: Date,    default: Date.now },
 });
 
-// Index unicité
-NodeSchema.index({ siteId: 1, macAddress: 1 }, { unique: true, sparse: true });
-NodeSchema.index({ siteId: 1, nodeId: 1 },     { unique: true, sparse: true });
+// Index unicité par MAC par site
+NodeSchema.index({ siteId: 1, macAddress: 1 }, { unique: true });
 
 // Nettoyage automatique avant sauvegarde
 NodeSchema.pre('save', function (next) {
   if (this.macAddress) this.macAddress = this.macAddress.trim().toUpperCase();
-  if (this.nodeId)     this.nodeId     = this.nodeId.trim();
 
   // Effacer les champs Master si le mode n'est pas Master
   if (this.mode !== 'Master') {
