@@ -1,21 +1,4 @@
 // ── Gestionnaire d'erreurs global ────────────────────────────
-//
-// FIX : Quand MongoDB retourne une erreur 11000 (duplicate key)
-// sur l'index { siteId, macAddress }, le handler original renvoyait :
-//   HTTP 409 { message: "macAddress déjà utilisé." }
-//
-// Le client (nodeRepo.js) attendait un 409 avec { node: { _id } }
-// pour récupérer le server_id du doublon et mettre à jour SQLite.
-// Sans ce _id, le client ne pouvait pas résoudre le doublon :
-//   - sync_pending restait à 1 sans server_id
-//   - la boucle de retry repassait en POST → nouveau 409 → boucle infinie
-//   - après MAX_ATTEMPTS, le nœud n'était jamais synchronisé
-//
-// SOLUTION : sur une erreur 11000 portant sur macAddress,
-// on recherche le nœud existant dans MongoDB et on le retourne
-// dans la réponse 409, exactement comme le fait createNode()
-// pour sa propre vérification de doublon.
-
 const Node = require('../models/Node');
 
 const errorHandler = async (err, req, res, next) => {
@@ -27,33 +10,34 @@ const errorHandler = async (err, req, res, next) => {
     return res.status(400).json({ message: messages.join('. ') });
   }
 
-  // ✅ FIX — Duplicate key (index unique MongoDB)
-  // Cas principal : doublon sur { siteId + macAddress }
-  // On retourne le nœud existant avec son _id pour que le client
-  // puisse résoudre le doublon et mettre à jour son server_id.
+  // Duplicate key MongoDB (index unique)
+  // ✅ FIX : retourner le _id du nœud existant pour que le client
+  // puisse résoudre le doublon et sauvegarder le server_id
   if (err.code === 11000) {
-    const field = Object.keys(err.keyValue ?? {})[0] ?? '';
+    const keyValue = err.keyValue ?? {};
+    const field    = Object.keys(keyValue)[0] ?? '';
 
-    // Doublon sur macAddress → chercher le nœud existant et le retourner
-    if (field === 'macAddress' || (err.keyValue?.siteId && err.keyValue?.macAddress)) {
+    // Doublon sur macAddress → chercher le nœud existant et retourner son _id
+    if (field === 'macAddress' || (keyValue.siteId && keyValue.macAddress)) {
       try {
-        const mac      = err.keyValue.macAddress;
-        const siteId   = err.keyValue.siteId ?? req.user?.siteId;
-        const existing = siteId && mac
-          ? await Node.findOne({ siteId, macAddress: mac })
+        const mac      = keyValue.macAddress;
+        const siteId   = keyValue.siteId ?? req.user?.siteId;
+        const existing = (siteId && mac)
+          ? await Node.findOne({ siteId, macAddress: mac }).lean()
           : null;
 
         return res.status(409).json({
-          message: `Cette carte existe déjà${existing ? ` sous le nom "${existing.name}"` : ''} (MAC : ${mac ?? '?'}).`,
+          message: existing
+            ? `Cette carte existe déjà sous le nom "${existing.name}" (MAC : ${mac}).`
+            : `Adresse MAC déjà utilisée (${mac}).`,
           node: existing ? { _id: existing._id, id: existing._id } : undefined,
         });
       } catch (lookupErr) {
-        console.error('[errorHandler] Lookup doublon MAC échoué:', lookupErr.message);
-        // Continuer vers la réponse générique 409
+        console.error('[errorHandler] lookup doublon MAC:', lookupErr.message);
       }
     }
 
-    // Doublon sur un autre champ (email, etc.)
+    // Autre doublon (email, etc.)
     return res.status(409).json({ message: `${field} déjà utilisé.` });
   }
 
