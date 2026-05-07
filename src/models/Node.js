@@ -74,8 +74,23 @@ const NodeSchema = new mongoose.Schema({
   updatedAt: { type: Date,    default: Date.now },
 });
 
-// Index unicité par MAC par site
+// Index unicité par MAC par site (seul index d'unicité valide)
 NodeSchema.index({ siteId: 1, macAddress: 1 }, { unique: true });
+
+// Suppression de l'ancien index nodeId s'il existe encore en base
+// (migration : nodeId a été remplacé par macAddress comme identifiant)
+NodeSchema.on('index', () => {
+  const col = mongoose.connection.collection('nodes');
+  col.indexExists('siteId_1_nodeId_1')
+    .then(exists => {
+      if (exists) {
+        col.dropIndex('siteId_1_nodeId_1')
+          .then(() => console.log('[Node] Ancien index siteId_1_nodeId_1 supprimé'))
+          .catch(() => {});
+      }
+    })
+    .catch(() => {});
+});
 
 // Nettoyage automatique avant sauvegarde
 NodeSchema.pre('save', function (next) {
