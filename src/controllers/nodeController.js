@@ -4,6 +4,10 @@
  * La config est envoyée DIRECTEMENT par l'app à la carte (WiFi AP ou BLE).
  * Le backend sert uniquement à persister les données dans MongoDB
  * pour la synchronisation optionnelle.
+ *
+ * FIX : Le 409 retourne toujours { node: { _id } } pour que le client
+ * puisse résoudre les doublons et mettre à jour son server_id dans SQLite.
+ * Sans ce _id, le client restait bloqué en boucle infinie de retry.
  */
 
 const mongoose  = require('mongoose');
@@ -32,12 +36,19 @@ const validateOutputFields = (mode, output, wifiSsid, wifiPass) => {
 
 // ────────────────────────────────────────────────────────────
 //  GET /api/nodes  —  Liste tous les nœuds du site
-// ────────────────────────────────────────────────────────────
-//  GET /api/nodes  —  Liste tous les nœuds du site
+//  Supporte ?mac=XX:XX:XX:XX:XX:XX pour chercher par MAC
 // ────────────────────────────────────────────────────────────
 exports.getNodes = async (req, res, next) => {
   try {
-    const nodes = await Node.find({ siteId: req.user.siteId, active: true }).sort({ name: 1 });
+    // ✅ FIX : support du filtre ?mac= utilisé par le fallback doublon
+    // dans nodeRepo.js quand le 409 ne contient pas de node._id
+    const macFilter = req.query.mac
+      ? { macAddress: req.query.mac.trim().toUpperCase() }
+      : {};
+
+    const nodes = await Node
+      .find({ siteId: req.user.siteId, active: true, ...macFilter })
+      .sort({ name: 1 });
 
     const formatted = nodes.map(n => ({
       id:              n._id,
@@ -93,6 +104,11 @@ exports.getNode = async (req, res, next) => {
 
 // ────────────────────────────────────────────────────────────
 //  POST /api/nodes  —  Enregistrer un nouveau nœud
+//
+//  ✅ FIX : le 409 retourne TOUJOURS { node: { _id, id } }
+//  pour que le client (nodeRepo.js) puisse résoudre le doublon
+//  et mettre à jour server_id dans SQLite.
+//  Sans ce _id, le client boucle indéfiniment en retry.
 // ────────────────────────────────────────────────────────────
 exports.createNode = async (req, res, next) => {
   try {
@@ -119,10 +135,11 @@ exports.createNode = async (req, res, next) => {
     if (outputError) return res.status(400).json({ message: outputError });
 
     // Vérification doublon par MAC
+    // ✅ FIX : on retourne toujours { node: { _id, id } } dans le 409
     const dup = await Node.findOne({ siteId: req.user.siteId, macAddress: mac });
     if (dup) return res.status(409).json({
       message: `Cette carte existe déjà sous le nom "${dup.name}" (MAC : ${mac}).`,
-      node: { _id: dup._id },
+      node: { _id: dup._id, id: dup._id },
     });
 
     const validIfaces     = ['bluetooth', 'wifi'];
@@ -145,7 +162,7 @@ exports.createNode = async (req, res, next) => {
       aes:         aes !== false,
       detectedVia: safeDetectedVia,
       firmware:    firmware?.trim() || null,
-      configPending: false, // config déjà envoyée directement par l'app
+      configPending: false,
       configAppliedAt: new Date(),
     };
 
