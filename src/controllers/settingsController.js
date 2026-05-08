@@ -63,6 +63,15 @@ exports.updateEncryption = async (req, res, next) => {
       }
     }
 
+    // Lire les valeurs actuelles AVANT mise à jour pour détecter un vrai changement
+    const existing = await Site.findOne({ siteId: req.user.siteId });
+    if (!existing) return res.status(404).json({ message: 'Site introuvable.' });
+
+    // ✅ FIX : détecter si les valeurs changent réellement
+    const hasChanged =
+      existing.aesEnabled !== aesEnabled ||
+      existing.aesKey     !== cleanedKey;
+
     // Mettre à jour le site
     const site = await Site.findOneAndUpdate(
       { siteId: req.user.siteId },
@@ -73,7 +82,6 @@ exports.updateEncryption = async (req, res, next) => {
       },
       { new: true, upsert: false }
     );
-    if (!site) return res.status(404).json({ message: 'Site introuvable.' });
 
     // Propager le flag AES à tous les nœuds actifs du site
     const updateResult = await Node.updateMany(
@@ -85,10 +93,14 @@ exports.updateEncryption = async (req, res, next) => {
     const onlineCount  = await Node.countDocuments({ siteId: req.user.siteId, status: 'online' });
     const offlineCount = await Node.countDocuments({ siteId: req.user.siteId, status: { $ne: 'online' } });
 
-    await Log.add(req.user.siteId, {
-      tag: 'SYS', type: 'ok',
-      msg: `Chiffrement AES-128 ${aesEnabled ? 'activé' : 'désactivé'} par ${req.user.fullName}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
-    });
+    // ✅ FIX : Logger SEULEMENT si les valeurs ont réellement changé
+    // Évite les logs parasites générés par le push de sync périodique (toutes les 30s)
+    if (hasChanged) {
+      await Log.add(req.user.siteId, {
+        tag: 'SYS', type: 'ok',
+        msg: `Chiffrement AES-128 ${aesEnabled ? 'activé' : 'désactivé'} par ${req.user.fullName}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
+      });
+    }
 
     res.json({
       message:      `Chiffrement ${aesEnabled ? 'activé' : 'désactivé'} sur ${updateResult.modifiedCount} nœud(s).`,
@@ -147,15 +159,24 @@ exports.updateLoraNetwork = async (req, res, next) => {
     if (!VALID_CR.includes(loraCr))
       return res.status(400).json({ message: `Coding Rate invalide. Valeurs acceptées : ${VALID_CR.join(', ')}.` });
 
-    // 1. Sauvegarder dans le Site
+    // 1. Lire les valeurs actuelles AVANT mise à jour pour détecter un vrai changement
+    const existing = await Site.findOne({ siteId: req.user.siteId });
+    if (!existing) return res.status(404).json({ message: 'Site introuvable.' });
+
+    const hasChanged =
+      existing.loraFrequency !== loraFrequency ||
+      existing.loraSf        !== loraSf        ||
+      existing.loraBw        !== loraBw        ||
+      existing.loraCr        !== loraCr;
+
+    // 2. Sauvegarder dans le Site
     const site = await Site.findOneAndUpdate(
       { siteId: req.user.siteId },
       { loraFrequency, loraSf, loraBw, loraCr, updatedAt: new Date() },
       { new: true, upsert: false }
     );
-    if (!site) return res.status(404).json({ message: 'Site introuvable.' });
 
-    // 2. Propager à TOUS les nœuds actifs du site
+    // 3. Propager à TOUS les nœuds actifs du site
     //    configPending = true → nodePusher renverra la config à chaque carte dès reconnexion
     const updateResult = await Node.updateMany(
       { siteId: req.user.siteId, active: { $ne: false } },
@@ -174,10 +195,14 @@ exports.updateLoraNetwork = async (req, res, next) => {
     const onlineCount  = await Node.countDocuments({ siteId: req.user.siteId, status: 'online',          active: { $ne: false } });
     const offlineCount = await Node.countDocuments({ siteId: req.user.siteId, status: { $ne: 'online' }, active: { $ne: false } });
 
-    await Log.add(req.user.siteId, {
-      tag: 'SYS', type: 'ok',
-      msg: `Paramètres LoRa réseau mis à jour par ${req.user.fullName} : ${loraFrequency} · ${loraSf} · ${loraBw} · ${loraCr}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
-    });
+    // ✅ FIX : Logger SEULEMENT si les valeurs ont réellement changé
+    // Évite les logs parasites générés par le push de sync périodique (toutes les 30s)
+    if (hasChanged) {
+      await Log.add(req.user.siteId, {
+        tag: 'SYS', type: 'ok',
+        msg: `Paramètres LoRa réseau mis à jour par ${req.user.fullName} : ${loraFrequency} · ${loraSf} · ${loraBw} · ${loraCr}. ${updateResult.modifiedCount} nœud(s) mis à jour.`,
+      });
+    }
 
     res.json({
       message:      `Paramètres LoRa propagés sur ${updateResult.modifiedCount} nœud(s).`,
