@@ -21,13 +21,12 @@ const { protect } = require('../middleware/auth');
 // Toutes les routes sync nécessitent d'être authentifié
 router.use(protect);
 
-// ❌ SUPPRIMÉ : POST /api/sync/pull
-// Cette route permettait au cloud d'écraser SQLite — interdit par l'architecture offline-first.
-// L'initialisation unique se fait via initializeFromCloudIfEmpty() dans syncService.js
-// qui appelle GET /api/nodes, /api/users, /api/settings, /api/routers avec INSERT OR IGNORE.
+// ✅ PULL : cloud → téléphone (nouvelles données des autres utilisateurs)
+// Anti-conflit intégré : le serveur compare updatedAt cloud vs modifiedAt local
+// et n'écrase jamais une modification locale plus récente.
+router.post('/pull', ctrl.pull);
 
-// ✅ SEUL SENS AUTORISÉ : téléphone → cloud
-// Reçoit les enregistrements avec sync_pending=1 et les applique dans MongoDB
+// ✅ PUSH : téléphone → cloud (modifications locales en attente)
 router.post('/push', ctrl.push);
 
 module.exports = router;

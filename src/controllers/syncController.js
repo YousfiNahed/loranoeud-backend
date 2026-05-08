@@ -118,17 +118,22 @@ function userToWatermelon(u) {
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sync/pull
-//  Retourne tout ce qui a changé depuis lastSyncAt
+//  Retourne tout ce qui a changé depuis lastSyncAt.
+//
+//  RÈGLE ANTI-CONFLIT :
+//  Le téléphone envoie aussi { localVersions: { nodeId: modifiedAt } }
+//  Le serveur compare updatedAt cloud vs modifiedAt local :
+//    - Si cloud plus récent → on envoie la version cloud (écrase local)
+//    - Si local plus récent → on N'envoie PAS ce nœud (le push a priorité)
+//  Ainsi jamais de perte de modification.
 // ─────────────────────────────────────────────────────────────
-exports.pull = async (req, res) => {
-  return res.status(410).json({ error: 'Route desactivee', message: 'Architecture offline-first.' });
-};
-
-exports.pull_disabled = async (req, res, next) => {
+exports.pull = async (req, res, next) => {
   try {
-    const siteId     = req.user.siteId;
-    const lastSyncAt = req.body.lastSyncAt ? new Date(req.body.lastSyncAt) : new Date(0);
-    const now        = Date.now();
+    const siteId        = req.user.siteId;
+    const lastSyncAt    = req.body.lastSyncAt ? new Date(req.body.lastSyncAt) : new Date(0);
+    // localVersions = { "<server_id>": <modified_at timestamp ms>, ... }
+    const localVersions = req.body.localVersions ?? {};
+    const now           = Date.now();
 
     // Récupérer tout ce qui a changé depuis le dernier sync
     const [nodes, logs, sites, users] = await Promise.all([
@@ -138,28 +143,31 @@ exports.pull_disabled = async (req, res, next) => {
       User.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
     ]);
 
-    // Construire la réponse au format WatermelonDB
+    // ── Filtre anti-conflit pour les nœuds ──────────────────
+    // Si le téléphone a une version locale plus récente que le cloud
+    // → on exclut ce nœud du pull (son push va arriver et écraser le cloud)
+    const filteredNodes = nodes.filter(n => {
+      const localModifiedAt = localVersions[String(n._id)];
+      if (!localModifiedAt) return true; // pas de version locale → on envoie
+      const cloudUpdatedAt = new Date(n.updatedAt ?? n.createdAt).getTime();
+      // Si local plus récent de plus de 5s → ne pas écraser (le push est en cours)
+      return cloudUpdatedAt > (localModifiedAt + 5000);
+    });
+
+    // ── Filtre anti-conflit pour les users (permissions) ────
+    const filteredUsers = users.filter(u => {
+      const localModifiedAt = localVersions['user_' + String(u._id)];
+      if (!localModifiedAt) return true;
+      const cloudUpdatedAt = new Date(u.updatedAt ?? u.createdAt).getTime();
+      return cloudUpdatedAt > (localModifiedAt + 5000);
+    });
+
     const changes = {
-      nodes: {
-        created: nodes.filter(n => new Date(n.createdAt) >= lastSyncAt).map(nodeToWatermelon),
-        updated: nodes.filter(n => new Date(n.createdAt) < lastSyncAt).map(nodeToWatermelon),
-        deleted: [],  // les suppressions sont gérées par le champ active = false
-      },
-      logs: {
-        created: logs.map(logToWatermelon),
-        updated: [],
-        deleted: [],
-      },
-      sites: {
-        created: sites.filter(s => new Date(s.createdAt) >= lastSyncAt).map(siteToWatermelon),
-        updated: sites.filter(s => new Date(s.createdAt) < lastSyncAt).map(siteToWatermelon),
-        deleted: [],
-      },
-      users: {
-        created: users.filter(u => new Date(u.createdAt) >= lastSyncAt).map(userToWatermelon),
-        updated: users.filter(u => new Date(u.createdAt) < lastSyncAt).map(userToWatermelon),
-        deleted: [],
-      },
+      nodes: filteredNodes.map(nodeToWatermelon),
+      logs:  logs.map(logToWatermelon),
+      sites: sites.map(siteToWatermelon),
+      users: filteredUsers.map(userToWatermelon),
+      timestamp: now,
     };
 
     res.json({ changes, timestamp: now });
