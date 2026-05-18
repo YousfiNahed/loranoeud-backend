@@ -1,22 +1,8 @@
 /**
- * controllers/syncController.js  — BACKEND (Node.js / Render)
+ * controllers/syncController.js  — BACKEND (Node.js)
  *
- * CORRECTIONS v2 :
- *
- *  ① [PROBLÈME #1 - DOUBLONS] Dans exports.push(), la création de logs via
- *     le cycle sync général vérifiait déjà server_id, MAIS cette vérification
- *     avait une faille : si le log avait été créé via addCriticalLog() et que
- *     son server_id n'était pas encore dans le body envoyé par le téléphone,
- *     on le recréait quand même. FIX : on compare aussi le champ 'msg' + 'created_at'
- *     pour détecter un log existant (déduplication par contenu).
- *
- *  ③ [PROBLÈME #3 - CONFLIT HORLOGE] Le seuil fixe de 5000ms était insuffisant.
- *     Problème : si le téléphone A a l'heure en avance, son timestamp local
- *     dépasse celui du cloud de plus de 5s → il écrase les modifs du téléphone B.
- *     FIX : on utilise le timestamp du SERVEUR (Date.now() côté backend) comme
- *     référence unique, jamais les horloges locales des téléphones. On augmente
- *     aussi le seuil à 30s pour couvrir les délais réseau réels en environnement
- *     industriel (WiFi instable, 4G avec latence).
+ * POST /api/sync/pull  — cloud → téléphone
+ * POST /api/sync/push  — téléphone → cloud
  */
 
 const Node = require('../models/Node');
@@ -25,7 +11,7 @@ const Site = require('../models/Site');
 const User = require('../models/User');
 
 // ─────────────────────────────────────────────────────────────
-//  Helpers : convertir MongoDB → format WatermelonDB (inchangés)
+//  Helpers : convertir MongoDB → format SQLite client
 // ─────────────────────────────────────────────────────────────
 function nodeToWatermelon(n) {
   return {
@@ -74,15 +60,15 @@ function nodeToWatermelon(n) {
 
 function logToWatermelon(l) {
   return {
-    id:          String(l._id),
-    server_id:   String(l._id),
-    site_id:     l.siteId ?? '',
-    tag:         l.tag ?? 'SYS',
-    type:        l.type ?? 'info',
-    msg:         l.msg ?? '',
-    node_id:     l.nodeId ?? '',
+    id:           String(l._id),
+    server_id:    String(l._id),
+    site_id:      l.siteId ?? '',
+    tag:          l.tag ?? 'SYS',
+    type:         l.type ?? 'info',
+    msg:          l.msg ?? '',
+    node_id:      l.nodeId ?? '',
     sync_pending: 0,
-    created_at:  new Date(l.createdAt ?? Date.now()).getTime(),
+    created_at:   new Date(l.createdAt ?? Date.now()).getTime(),
   };
 }
 
@@ -124,22 +110,21 @@ function userToWatermelon(u) {
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sync/pull
 //
-//  FIX #3 — CONFLIT D'HORLOGE :
-//  Avant : le seuil anti-conflit était 5000ms comparé aux horloges
-//  locales des téléphones. Si le téléphone A avait l'heure en avance
-//  de 6s, son timestamp local dépassait celui du cloud → il écrasait
-//  silencieusement les modifs du téléphone B.
+//  Le client envoie :
+//    - lastSyncAt        : timestamp du dernier pull réussi
+//    - localVersions     : map { server_id → modified_at } pour les nœuds et users
+//    - knownLogIds       : liste des server_id de logs déjà présents en local
+//    - pendingLogFingerprints : liste { msg, created_at } des logs locaux
+//                         en attente (sync_pending=1, pas encore de server_id)
 //
-//  Maintenant :
-//  - Le seuil est passé à 30 000ms (30s) pour couvrir les délais réseau
-//    réels en environnement industriel (WiFi instable, 4G avec latence).
-//  - On utilise updatedAt stocké dans MongoDB (mis à jour par le serveur)
-//    comme référence. Les horloges locales des téléphones ne sont jamais
-//    comparées entre elles directement.
-//  - En pratique : si le cloud a une version du nœud mise à jour il y a
-//    moins de 30s, et que le téléphone a aussi une version récente, on
-//    laisse passer le pull (le serveur a peut-être déjà intégré un push
-//    d'un autre téléphone). Sinon le push local a la priorité.
+//  Anti-doublon logs :
+//    1. On exclut les logs dont le _id est dans knownLogIds (déjà synchronisés)
+//    2. On exclut les logs dont le msg+createdAt correspond à un fingerprint
+//       pending du client (log créé localement, pas encore pushé, mais un autre
+//       téléphone l'a déjà pushé → on ne le renvoie pas pour éviter le doublon)
+//
+//  Anti-conflit nœuds/users :
+//    On n'écrase pas une modification locale récente (seuil 30s).
 // ─────────────────────────────────────────────────────────────
 exports.pull = async (req, res, next) => {
   try {
@@ -147,29 +132,51 @@ exports.pull = async (req, res, next) => {
     const lastSyncAt    = req.body.lastSyncAt ? new Date(req.body.lastSyncAt) : new Date(0);
     const localVersions = req.body.localVersions ?? {};
 
-    // ✅ FIX #3 : on utilise Date.now() SERVEUR comme référence unique
-    // Tous les téléphones se synchronisent sur l'horloge du serveur,
-    // pas sur leurs propres horloges (qui peuvent diverger).
+    // IDs des logs que le client possède déjà → exclus par _id MongoDB
+    const knownLogIds = Array.isArray(req.body.knownLogIds)
+      ? req.body.knownLogIds
+      : [];
+
+    // Fingerprints des logs locaux en attente sur ce client
+    // Format : [{ msg: string, created_at: number (ms) }]
+    const pendingFingerprints = Array.isArray(req.body.pendingLogFingerprints)
+      ? req.body.pendingLogFingerprints
+      : [];
+
+    // Timestamp serveur — référence unique pour tous les téléphones
     const now = Date.now();
 
-    const [nodes, logs, sites, users] = await Promise.all([
+    // Filtre MongoDB pour les logs : exclure ceux déjà connus par _id
+    const logFilter = { siteId, createdAt: { $gte: lastSyncAt } };
+    if (knownLogIds.length > 0) {
+      logFilter._id = { $nin: knownLogIds };
+    }
+
+    const [nodes, logsRaw, sites, users] = await Promise.all([
       Node.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
-      Log.find({ siteId, createdAt: { $gte: lastSyncAt } }).sort({ createdAt: -1 }).limit(200),
+      Log.find(logFilter).sort({ createdAt: -1 }).limit(200),
       Site.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
       User.find({ siteId, updatedAt: { $gte: lastSyncAt } }),
     ]);
 
-    // ── Filtre anti-conflit pour les nœuds ──────────────────
-    // ✅ FIX #3 : seuil augmenté de 5s → 30s
-    // Pourquoi 30s ? En WiFi industriel ou 4G, un push peut prendre
-    // jusqu'à 10-15s. Avec 5s de seuil, on écrasait les modifs en cours
-    // de push. Avec 30s, on protège toute la fenêtre de transmission.
+    // Filtre JS : exclure les logs dont le contenu correspond à un log
+    // pending du client (même msg, créé à ±60s). Evite qu'un téléphone
+    // reçoive un log qu'il a lui-même créé mais pas encore pushé.
+    const logs = pendingFingerprints.length === 0
+      ? logsRaw
+      : logsRaw.filter(l => {
+          const lMs = new Date(l.createdAt).getTime();
+          return !pendingFingerprints.some(
+            fp => fp.msg === l.msg && Math.abs(fp.created_at - lMs) < 60000
+          );
+        });
+
+    // Anti-conflit nœuds : ne pas écraser une modif locale de moins de 30s
     const CONFLICT_THRESHOLD_MS = 30000;
 
     const filteredNodes = nodes.filter(n => {
       const localModifiedAt = localVersions[String(n._id)];
       if (!localModifiedAt) return true;
-      // ✅ FIX #3 : updatedAt vient de MongoDB (serveur), pas du téléphone
       const cloudUpdatedAt = new Date(n.updatedAt ?? n.createdAt).getTime();
       return cloudUpdatedAt > (localModifiedAt + CONFLICT_THRESHOLD_MS);
     });
@@ -186,7 +193,7 @@ exports.pull = async (req, res, next) => {
       logs:  logs.map(logToWatermelon),
       sites: sites.map(siteToWatermelon),
       users: filteredUsers.map(userToWatermelon),
-      timestamp: now, // ✅ Timestamp serveur — référence unique pour tous
+      timestamp: now,
     };
 
     res.json({ changes, timestamp: now });
@@ -197,17 +204,12 @@ exports.pull = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────
 //  POST /api/sync/push
 //
-//  FIX #1 — ANTI-DOUBLONS LOGS :
-//  Avant : on vérifiait seulement si server_id était absent pour décider
-//  de créer le log dans MongoDB. Mais si addCriticalLog() avait déjà
-//  créé le log dans MongoDB et que le téléphone envoyait ensuite le même
-//  log via le cycle sync général (sans server_id dans le body car le
-//  téléphone n'avait pas encore reçu la réponse), on recréait le log.
+//  Reçoit les modifications locales du téléphone.
+//  Traite les nœuds (create/update/delete) et les logs sans server_id.
 //
-//  Maintenant : on vérifie d'abord par server_id (cas normal), puis on
-//  fait une déduplication par contenu (msg + nodeId + horodatage proche)
-//  pour les cas où server_id est manquant mais le log existe déjà.
-//  Résultat : même si le même log arrive deux fois, il n'est créé qu'une.
+//  Anti-doublon logs :
+//    - Si server_id présent et valide → log déjà dans MongoDB, on skip
+//    - Si server_id absent → déduplication par contenu (msg + ±60s)
 // ─────────────────────────────────────────────────────────────
 exports.push = async (req, res, next) => {
   try {
@@ -227,8 +229,8 @@ exports.push = async (req, res, next) => {
       console.log(`[syncController] Reset cloud pour le site ${siteId}`);
     }
 
-    // ── Traiter les nœuds (inchangé) ─────────────────────────
-    const nodeChanges = changes.nodes ?? {};
+    // ── Nœuds ─────────────────────────────────────────────────
+    const nodeChanges    = changes.nodes ?? {};
     const allNodeChanges = [
       ...(nodeChanges.created ?? []),
       ...(nodeChanges.updated ?? []),
@@ -238,26 +240,24 @@ exports.push = async (req, res, next) => {
       const serverId = raw.server_id || raw.id;
       if (!serverId || serverId.length !== 24) continue;
 
-      const update = {
-        mode:      raw.mode,
-        baudRate:  raw.baud_rate,
-        parity:    raw.parity,
-        modbusId:  raw.modbus_id,
-        timeout:   raw.timeout,
-        retries:   raw.retries === 1 || raw.retries === true,
-        fc:        raw.fc,
-        txPower:   raw.tx_power,
-        lowPower:  raw.low_power === 1 || raw.low_power === true,
-        aes:       raw.aes === 1 || raw.aes === true,
-        output:    raw.output || null,
-        // ✅ FIX #3 : updatedAt mis à jour par le SERVEUR, pas par le téléphone
-        // Ainsi tous les téléphones utilisent la même référence de temps
-        updatedAt: new Date(),
-      };
-
       await Node.findOneAndUpdate(
         { _id: serverId, siteId },
-        { $set: update },
+        {
+          $set: {
+            mode:      raw.mode,
+            baudRate:  raw.baud_rate,
+            parity:    raw.parity,
+            modbusId:  raw.modbus_id,
+            timeout:   raw.timeout,
+            retries:   raw.retries === 1 || raw.retries === true,
+            fc:        raw.fc,
+            txPower:   raw.tx_power,
+            lowPower:  raw.low_power === 1 || raw.low_power === true,
+            aes:       raw.aes === 1 || raw.aes === true,
+            output:    raw.output || null,
+            updatedAt: new Date(), // timestamp serveur — référence unique
+          },
+        },
         { new: false }
       );
     }
@@ -271,47 +271,42 @@ exports.push = async (req, res, next) => {
       );
     }
 
-    // ── Traiter les logs — FIX #1 ANTI-DOUBLONS ──────────────
+    // ── Logs ──────────────────────────────────────────────────
     const logChanges = changes.logs ?? {};
     for (const raw of (logChanges.created ?? [])) {
 
-      // Cas 1 : server_id présent et valide → log déjà dans MongoDB, on skip
+      // server_id présent et valide → déjà dans MongoDB, on skip
       if (raw.server_id && raw.server_id.length === 24) continue;
 
-      // ✅ FIX #1 — Cas 2 : server_id absent MAIS le log existe peut-être déjà
-      // (créé par addCriticalLog() quelques secondes avant ce cycle de sync)
-      // On déduplique par contenu : même msg + même nodeId + créé dans les 60s
+      // Pas de server_id → déduplication par contenu (msg + ±60s)
       if (raw.msg) {
         const createdAtMs = raw.created_at
           ? new Date(raw.created_at).getTime()
           : Date.now();
-        const windowStart = new Date(createdAtMs - 60000); // 60s de fenêtre
+        const windowStart = new Date(createdAtMs - 60000);
         const windowEnd   = new Date(createdAtMs + 60000);
 
         const existing = await Log.findOne({
           siteId,
           msg:       raw.msg,
-          nodeId:    raw.node_id ?? null,
           createdAt: { $gte: windowStart, $lte: windowEnd },
         });
 
         if (existing) {
-          // Log trouvé dans MongoDB → c'est un doublon, on l'ignore
-          console.log(`[syncController] Doublon détecté et ignoré : "${raw.msg?.substring(0, 50)}"`);
+          console.log(`[syncController] Doublon push ignoré : "${raw.msg?.substring(0, 60)}"`);
           continue;
         }
       }
 
-      // Pas de doublon → on crée le log normalement
       await Log.add(siteId, {
-        tag:    raw.tag ?? 'SYS',
-        type:   raw.type ?? 'info',
-        msg:    raw.msg ?? '',
+        tag:    raw.tag    ?? 'SYS',
+        type:   raw.type   ?? 'info',
+        msg:    raw.msg    ?? '',
         nodeId: raw.node_id ?? undefined,
       });
     }
 
-    // Log de trace interne (1 seul, pas de doublon possible ici)
+    // Log de trace (1 seul par push, pas de doublon possible ici)
     if (allNodeChanges.length > 0) {
       await Log.add(siteId, {
         tag: 'SYS', type: 'info',
